@@ -1,6 +1,9 @@
 package com.blueskies.springbatch.chunk;
 
 import com.blueskies.springbatch.chunk.processors.MyItemProcessor;
+import com.blueskies.springbatch.chunk.processors.MyItemProcessorForFailures;
+import com.blueskies.springbatch.chunk.skiplisteners.SkipListener;
+import com.blueskies.springbatch.chunk.skiplisteners.SkipListenerImpl;
 import com.blueskies.springbatch.chunk.writers.*;
 import com.blueskies.springbatch.model.StudentCsv;
 import com.blueskies.springbatch.model.StudentJdbc;
@@ -13,6 +16,8 @@ import org.springframework.batch.core.configuration.annotation.StepScope;
 import org.springframework.batch.core.job.builder.JobBuilder;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.batch.core.step.skip.AlwaysSkipItemSkipPolicy;
+import org.springframework.batch.item.Chunk;
 import org.springframework.batch.item.database.BeanPropertyItemSqlParameterSourceProvider;
 import org.springframework.batch.item.database.JdbcBatchItemWriter;
 import org.springframework.batch.item.database.JdbcCursorItemReader;
@@ -49,12 +54,14 @@ public class SampleChunkJob {
     private DataSource dataSource;
     private PlatformTransactionManager platformTransactionManager;
     private JobRepository jobRepository;
+    private SkipListener skipListener;
+    private SkipListenerImpl skipListenerImpl;
 
     @Bean
     public Job mySecondJob() {
         return new JobBuilder("Chunk example job", jobRepository)
                 .incrementer(new MyCustomIdIncrementer())
-                .start(firstStepWithFlatFileAndJdbcItemWriter())
+                .start(firstStepWithCSV())
                 .build();
     }
 
@@ -125,6 +132,25 @@ public class SampleChunkJob {
                 .build();
     }
 
+    public Step firstStepWithFlatFileAndJsonItemWriterWithFaultTolerance() {
+        return new StepBuilder("first step using Flat file and JdbcItemWriter", jobRepository)
+                .<StudentCsv, StudentJson>chunk(3, platformTransactionManager)
+                .reader(csvFlatFileItemReaderFaultTolerance(null))
+                .processor(new MyItemProcessorForFailures())
+                .writer(jsonFileItemWriterToUseWithingFaultTorelanceStep(null))
+                .faultTolerant()
+                .skip(Throwable.class)
+//                .skip(NullPointerException.class)
+//                .skipLimit(Integer.MAX_VALUE)
+                .skipPolicy(new AlwaysSkipItemSkipPolicy()) // se supone que esta linea junto con retry deberia crear un loop eterno, pero hasta hora no sucedio. Tenlo en cuenta
+                .retry(Throwable.class)
+                .retryLimit(2)
+//                .listener(skipListener)
+                .listener(skipListenerImpl)
+                .build();
+    }
+
+
     /* --- READERS --- */
 
     @Bean
@@ -147,9 +173,10 @@ public class SampleChunkJob {
 
     @Bean
     @StepScope
-    public JsonItemReader<StudentJson> jsonItemReader(@Value("#{jobParameters['inputFile']}") FileSystemResource fileSystemResource) {
+    public JsonItemReader<StudentJson> jsonItemReader(@Value("#{jobParameters['inputFile']}") String fileSystemResource) {
         JsonItemReader<StudentJson> jsonItemReader = new JsonItemReader<>();
-        jsonItemReader.setResource(fileSystemResource);
+//        jsonItemReader.setResource(fileSystemResource);
+        jsonItemReader.setResource(new FileSystemResource(fileSystemResource+".json"));
         jsonItemReader.setJsonObjectReader(new JacksonJsonObjectReader<>(StudentJson.class));
         jsonItemReader.setName("JSON item reader");
         jsonItemReader.setMaxItemCount(8);
@@ -159,12 +186,13 @@ public class SampleChunkJob {
 
     @Bean
     @StepScope
-    public StaxEventItemReader<StudentXml> xmlStaxEventItemReader(@Value("#{jobParameters['inputFile']}") FileSystemResource fileSystemResource) {
+    public StaxEventItemReader<StudentXml> xmlStaxEventItemReader(@Value("#{jobParameters['inputFile']}") String fileSystemResource) {
         Jaxb2Marshaller jaxb2Marshaller = new Jaxb2Marshaller();
         jaxb2Marshaller.setClassesToBeBound(StudentXml.class);
 
         StaxEventItemReader<StudentXml> staxEventItemReader = new StaxEventItemReader<>();
-        staxEventItemReader.setResource(fileSystemResource);
+//        staxEventItemReader.setResource(fileSystemResource);
+        staxEventItemReader.setResource(new FileSystemResource(fileSystemResource+".xml"));
         staxEventItemReader.setFragmentRootElementName("student");
         staxEventItemReader.setUnmarshaller(jaxb2Marshaller);
 
@@ -173,11 +201,23 @@ public class SampleChunkJob {
 
     @Bean
     @StepScope
-    public FlatFileItemReader<StudentCsv> csvFlatFileItemReader(@Value("#{jobParameters['inputFile']}") FileSystemResource fileSystemResource) {
+    public FlatFileItemReader<StudentCsv> csvFlatFileItemReader(@Value("#{jobParameters['inputFile']}") String fileSystemResource) {
         FlatFileItemReader<StudentCsv> flatFileItemReader = new FlatFileItemReader<>();
         flatFileItemReader.setName("csv flatFileItemReader");
-//        flatFileItemReader.setResource(new FileSystemResource("src/main/resources/inputfiles/students.csv"));
-        flatFileItemReader.setResource(fileSystemResource);
+        flatFileItemReader.setResource(new FileSystemResource(fileSystemResource+".csv"));
+//        flatFileItemReader.setResource(fileSystemResource);
+        flatFileItemReader.setLinesToSkip(1);
+        flatFileItemReader.setLineMapper(lineMapper());
+        return flatFileItemReader;
+    }
+
+    @Bean
+    @StepScope
+    public FlatFileItemReader<StudentCsv> csvFlatFileItemReaderFaultTolerance(@Value("#{jobParameters['inputFileWithError']}") String fileSystemResource) {
+        FlatFileItemReader<StudentCsv> flatFileItemReader = new FlatFileItemReader<>();
+        flatFileItemReader.setName("csv flatFileItemReader Fault Tolerance");
+        flatFileItemReader.setResource(new FileSystemResource(fileSystemResource));
+//        flatFileItemReader.setResource(fileSystemResource);
         flatFileItemReader.setLinesToSkip(1);
         flatFileItemReader.setLineMapper(lineMapper());
         return flatFileItemReader;
@@ -188,7 +228,7 @@ public class SampleChunkJob {
 
         DelimitedLineTokenizer delimitedLineTokenizer = new DelimitedLineTokenizer();
         delimitedLineTokenizer.setNames("id", "firstName", "lastName", "email");
-        delimitedLineTokenizer.setStrict(false);
+        delimitedLineTokenizer.setStrict(true); // this was set to true to enable failures with delimited files, on first place was set to true
 
         BeanWrapperFieldSetMapper<StudentCsv> fieldSetMapper = new BeanWrapperFieldSetMapper<>();
         fieldSetMapper.setTargetType(StudentCsv.class);
@@ -203,7 +243,7 @@ public class SampleChunkJob {
 
     @Bean
     @StepScope
-    public FlatFileItemWriter<StudentJdbc> flatFileItemWriter(@Value("#{jobParameters['outputFile']}") FileSystemResource fileSystemResource) {
+    public FlatFileItemWriter<StudentJdbc> flatFileItemWriter(@Value("#{jobParameters['outputFile']}") String fileSystemResource) {
 
         BeanWrapperFieldExtractor<StudentJdbc> fieldExtractor = new BeanWrapperFieldExtractor<>();
         fieldExtractor.setNames(new String[]{"id", "firstName", "lastName", "email"});
@@ -214,7 +254,8 @@ public class SampleChunkJob {
         lineAggregator.setFieldExtractor(fieldExtractor);
 
         FlatFileItemWriter<StudentJdbc> flatFileItemWriter = new FlatFileItemWriter<>();
-        flatFileItemWriter.setResource(fileSystemResource);
+//        flatFileItemWriter.setResource(fileSystemResource);
+        flatFileItemWriter.setResource(new FileSystemResource(fileSystemResource+".csv"));
         flatFileItemWriter.setLineAggregator(lineAggregator);
         flatFileItemWriter.setHeaderCallback(writer -> writer.write("ID,FIRST NAME,LASTNAME,EMAIL"));
         flatFileItemWriter.setFooterCallback(writer -> writer.write("Created at " + LocalDateTime.now()));
@@ -224,20 +265,37 @@ public class SampleChunkJob {
 
     @Bean
     @StepScope
-    public JsonFileItemWriter<StudentJson> jsonFileItemWriter(@Value("#{jobParameters['outputFile']}") FileSystemResource fileSystemResource) {
-        JsonFileItemWriter<StudentJson> jdbcJsonFileItemWriter = new JsonFileItemWriter<>(fileSystemResource,new JacksonJsonObjectMarshaller<>());
-        return jdbcJsonFileItemWriter;
+    public JsonFileItemWriter<StudentJson> jsonFileItemWriter(@Value("#{jobParameters['outputFile']}") String fileSystemResource) {
+        return new JsonFileItemWriter<>(new FileSystemResource(fileSystemResource+".json"),new JacksonJsonObjectMarshaller<>());
     }
 
     @Bean
     @StepScope
-    public StaxEventItemWriter<StudentJdbc> xmlFileItemWriter(@Value("#{jobParameters['outputFile']}") FileSystemResource fileSystemResource) {
+    public JsonFileItemWriter<StudentJson> jsonFileItemWriterToUseWithingFaultTorelanceStep(@Value("#{jobParameters['outputFile']}") String fileSystemResource) {
+        return new JsonFileItemWriter<>(new FileSystemResource(fileSystemResource+".json"),new JacksonJsonObjectMarshaller<>()){
+            @Override
+            public String doWrite(Chunk<? extends StudentJson> items) {
+                items.forEach(studentJson -> {
+                    if (studentJson.getId() == 10) {
+                        System.out.println("INSIDE WRITER");
+                        throw new NullPointerException();
+                    }
+                });
+                return super.doWrite(items);
+            }
+        };
+    }
+
+    @Bean
+    @StepScope
+    public StaxEventItemWriter<StudentJdbc> xmlFileItemWriter(@Value("#{jobParameters['outputFile']}") String fileSystemResource) {
         Jaxb2Marshaller jaxb2Marshaller = new Jaxb2Marshaller();
         jaxb2Marshaller.setClassesToBeBound(StudentJdbc.class);
 
         StaxEventItemWriter<StudentJdbc> staxEventItemWriter = new StaxEventItemWriter<>();
         staxEventItemWriter.setRootTagName("students");
-        staxEventItemWriter.setResource(fileSystemResource);
+//        staxEventItemWriter.setResource(fileSystemResource);
+        staxEventItemWriter.setResource(new FileSystemResource(fileSystemResource+".xml"));
         staxEventItemWriter.setMarshaller(jaxb2Marshaller);
 
         return staxEventItemWriter;

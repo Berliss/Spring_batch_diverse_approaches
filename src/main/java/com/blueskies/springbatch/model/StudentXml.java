@@ -13,7 +13,7 @@ import lombok.NoArgsConstructor;
 @XmlRootElement(name = "student")
 public class StudentXml {
     private long id;
-    @Getter(onMethod_ = {@XmlElement(name = "f_N")})
+    //    @Getter(onMethod_ = {@XmlElement(name = "f_N")}) //This is to bind a property to a node in xml with different names
     private String firstName;
     private String lastName;
     private String email;

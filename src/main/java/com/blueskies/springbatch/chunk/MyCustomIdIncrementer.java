@@ -6,6 +6,10 @@ import org.springframework.batch.core.JobParametersBuilder;
 import org.springframework.batch.core.JobParametersIncrementer;
 import org.springframework.lang.Nullable;
 
+/*
+* This class was created to solve the problem that comes with the default implementation
+* the default one take the previous jobParameters used on previous job execution
+* */
 public class MyCustomIdIncrementer implements JobParametersIncrementer {
 
     private static final String RUN_ID_KEY = "run.id";
